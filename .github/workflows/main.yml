@@ -1,0 +1,110 @@
+name: Arch & Fedora GNOME + Tailscale + xRDP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-rdp:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        container_image:
+          - fedora:latest
+          - archlinux:latest
+
+    container:
+      image: ${{ matrix.container_image }}
+      options: --privileged
+
+    env:
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      USERNAME: runner
+      PASSWORD: runner
+      TAILSCALE_HOSTNAME: ${{ matrix.container_image }}-rdp-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare system (detect OS & install base tools)
+        run: |
+          if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            DISTRO_ID="$ID"
+          elif [ -f /etc/arch-release ]; then
+            DISTRO_ID="arch"
+          fi
+
+          echo "Detected distro: $DISTRO_ID"
+
+          case "$DISTRO_ID" in
+            fedora)
+              dnf install -y sudo
+              ;;
+            arch)
+              pacman -Syu --noconfirm sudo
+              ;;
+          esac
+
+          echo "DISTRO_ID=$DISTRO_ID" >> $GITHUB_ENV
+
+      - name: Create user & grant sudo
+        run: |
+          useradd -m ${USERNAME}
+          echo "${USERNAME}:${PASSWORD}" | chpasswd
+          echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
+
+      - name: Install GNOME Desktop & xRDP
+        run: |
+          case "$DISTRO_ID" in
+            fedora)
+              echo ">>> Fedora: installing GNOME + xRDP..."
+              dnf -y update
+              dnf -y groupinstall "GNOME"
+              dnf -y install xrdp
+              usermod -aG xrdp ${USERNAME}
+              ;;
+            arch)
+              echo ">>> Arch: installing GNOME + xRDP..."
+              pacman -Syu --noconfirm
+              pacman -S --noconfirm gnome gnome-extra xrdp
+              usermod -aG xrdp ${USERNAME}
+              ;;
+          esac
+
+      - name: Start D-Bus (essential for GNOME/xRDP)
+        run: |
+          dbus-daemon --system --fork
+          export $(dbus-launch)
+
+      - name: Start xRDP services manually
+        run: |
+          /usr/sbin/xrdp-sesman &
+          /usr/sbin/xrdp &
+          sleep 2
+
+      - name: Install & connect Tailscale
+        run: |
+          echo ">>> Installing Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          tailscale up --authkey "${TAILSCALE_AUTHKEY}" --hostname "${TAILSCALE_HOSTNAME}"
+
+      - name: Display connection info & keep alive
+        run: |
+          TAILSCALE_IP=$(tailscale ip -4 | head -n1)
+
+          echo "========================================="
+          echo "   RDP CONNECTION (${{ matrix.container_image }})"
+          echo "========================================="
+          echo "USERNAME : ${USERNAME}"
+          echo "PASSWORD : ${PASSWORD}"
+          echo "RDP IP   : ${TAILSCALE_IP}"
+          echo ""
+          echo "Connect with any RDP client to the IP above."
+          echo "This method is provided by @MR_English2008."
+          echo "More methods: https://t.me/ME2008_RDP"
+          echo ">>> Keeping runner alive..."
+          tail -f /dev/null
